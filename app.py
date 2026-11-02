@@ -50,20 +50,16 @@ async def async_main(tg: TgClient):
 def main() -> None:
     api_id, api_hash, session_str = load_config()
 
-    # Отдельный поток с asyncio loop для Telethon
     loop = asyncio.new_event_loop()
     threading.Thread(target=start_background_loop, args=(loop,), daemon=True).start()
 
     tg = TgClient(api_id, api_hash, session_str)
 
-    # Авторизация до запуска GUI
     future = asyncio.run_coroutine_threadsafe(async_main(tg), loop)
-    future.result()  # ждём завершения входа
+    future.result()
 
-    # Создаём GUI в главном потоке
     gui = TgGui(tg, loop)
 
-    # Регистрируем обработчик входящих, который пушит в GUI
     async def on_incoming(event):
         sender = await event.get_sender()
         name = getattr(sender, "first_name", None) or getattr(sender, "title", "?")
@@ -71,8 +67,7 @@ def main() -> None:
 
     tg.start_listening(on_incoming)
 
-    # Загружаем чаты и запускаем mainloop
-    gui.load_chats()
+    gui.load_folders_and_chats()   # <── вот эта строка
     gui.run()
 
 
