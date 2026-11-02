@@ -123,6 +123,25 @@ def unread_text(count: int) -> str:
     return "99+" if count > 99 else str(count)
 
 
+def views_text(count: int | None) -> str:
+    """Короткое число просмотров: 1,5K / 2,4M."""
+
+    if count is None:
+        return ""
+    if count < 1000:
+        return str(count)
+    if count < 1_000_000:
+        return _compact(count / 1000) + "K"
+    return _compact(count / 1_000_000) + "M"
+
+
+def _compact(value: float) -> str:
+    text = f"{value:.1f}".replace(".", ",")
+    if text.endswith(",0"):
+        text = text[:-2]
+    return text
+
+
 def plural(count: int, one: str, few: str, many: str) -> str:
     """Русское склонение по числу."""
 

@@ -17,6 +17,7 @@ src/telegram_personal_messenger.egg-info/top_level.txt
 src/telegram_personal_messenger/ui/__init__.py
 src/telegram_personal_messenger/ui/login.py
 src/telegram_personal_messenger/ui/main_window.py
+src/telegram_personal_messenger/ui/media.py
 src/telegram_personal_messenger/ui/setup.py
 src/telegram_personal_messenger/ui/text.py
 src/telegram_personal_messenger/ui/theme.py

@@ -12,6 +12,7 @@ from telegram_personal_messenger.formatting import (
     plural,
     preview,
     unread_text,
+    views_text,
 )
 
 
@@ -82,6 +83,14 @@ class NameFormattingTests(unittest.TestCase):
         self.assertEqual(unread_text(0), "")
         self.assertEqual(unread_text(7), "7")
         self.assertEqual(unread_text(100), "99+")
+
+    def test_views_text(self):
+        self.assertEqual(views_text(None), "")
+        self.assertEqual(views_text(0), "0")
+        self.assertEqual(views_text(999), "999")
+        self.assertEqual(views_text(1500), "1,5K")
+        self.assertEqual(views_text(1_000_000), "1M")
+        self.assertEqual(views_text(2_400_000), "2,4M")
 
 
 class PluralTests(unittest.TestCase):

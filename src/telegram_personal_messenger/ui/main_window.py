@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import queue
 import tkinter as tk
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from ..models import Account, Chat, MAX_MESSAGE_LENGTH, Message, SendOutcome
 from ..state import ChatStore
 from ..telegram_service import TelegramService
 from .login import LoginView
+from .media import load_photoimage
 from .text import (
     account_title,
     chat_subtitle,
@@ -67,7 +69,13 @@ class MainWindow:
         self.store = ChatStore()
 
         self._account: Account | None = None
+        self.read_only = os.environ.get("TPM_READ_ONLY") == "1"
         self._shell_built = False
+        self._avatar_paths: dict[int, Path] = {}
+        self._avatar_photos: dict[tuple[int, int], tk.PhotoImage] = {}
+        self._avatar_requested: set[int] = set()
+        self._media_thumbs: dict[tuple[int, int], tk.PhotoImage] = {}
+        self._media_requested: set[tuple[int, int]] = set()
         self._destroyed = False
         self._closing = False
         self._login_view: LoginView | None = None
@@ -82,6 +90,8 @@ class MainWindow:
         self._loading_older = False
         self._bubbles: list[MessageBubble] = []
         self._send_pending = False
+        self._reply_to: int | None = None
+        self._editing: int | None = None
         self._loading_sidebar = False
         self._refresh_after_id: str | None = None
         self._resize_after_id: str | None = None
@@ -105,7 +115,7 @@ class MainWindow:
         p = self.theme.palette
         self.root.title("Telegram — личный клиент")
         self.root.configure(bg=p.window)
-        self.root.minsize(1020, 660)
+        self.root.minsize(900, 620)
         width, height = 1180, 760
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
@@ -173,6 +183,7 @@ class MainWindow:
             self.service.start_listening(self._incoming.put)
         except Exception:
             logger.warning("Не удалось включить обработчик входящих сообщений")
+        self._request_avatar(self._account.id, photo_available=True)
         self._load_sidebar(initial=True)
 
     def _build_shell(self) -> None:
@@ -391,6 +402,7 @@ class MainWindow:
         self.composer_text = tk.Text(
             input_frame,
             height=1,
+            width=1,
             wrap="word",
             undo=True,
             bg=p.surface,
@@ -415,15 +427,15 @@ class MainWindow:
         self.send_button = FlatButton(
             composer,
             self.theme,
-            "Отправить",
+            "➤",
             self._send,
             bg=p.accent,
             fg=p.window,
             hover_bg=p.accent_dark,
             hover_fg=p.window,
-            font=self.theme.font(10, "bold"),
-            padx=18,
-            pady=10,
+            font=self.theme.font(14, "bold"),
+            padx=14,
+            pady=8,
         )
         self.send_button.grid(row=0, column=1, padx=(10, 0), sticky="se")
 
@@ -632,6 +644,7 @@ class MainWindow:
             self.chat_list.bind_wheel(label)
 
         for chat in visible:
+            photo = self._photo(chat.id, 46)
             row = ChatRow(
                 self.chat_list.inner,
                 self.theme,
@@ -639,8 +652,11 @@ class MainWindow:
                 selected=chat.id == self.store.selected_id,
                 on_click=self._open_chat,
                 scroll=self.chat_list,
+                photo=photo,
             )
             row.pack(fill="x")
+            if chat.photo_available:
+                self._request_avatar(chat.id, photo_available=True)
 
         self.chat_list.update_idletasks()
         if not reset_scroll:
@@ -694,6 +710,8 @@ class MainWindow:
         token = self._history_token
         self._loaded_chat_id = chat_id
         self._messages = []
+        self._reply_to = None
+        self._editing = None
         self._has_older = True
         self._loading_history = True
         self._loading_older = False
@@ -803,6 +821,8 @@ class MainWindow:
         self._open_chat(self._loaded_chat_id)
 
     def _mark_read(self, chat_id: int) -> None:
+        if self.read_only:
+            return
         if self.store.mark_read(chat_id):
             self._render_chat_list()
         self._submit(
@@ -891,6 +911,9 @@ class MainWindow:
                 and bool(message.sender_name)
                 and message.sender_name != previous_sender
             )
+            media_photo = None
+            if message.media_kind in ("photo", "video"):
+                media_photo = self._media_thumb(message.chat_id, message.id)
             bubble = MessageBubble(
                 self.message_area.inner,
                 self.theme,
@@ -898,10 +921,18 @@ class MainWindow:
                 show_sender=show_sender,
                 wraplength=wraplength,
                 scroll=self.message_area,
+                media_photo=media_photo,
+                on_action=self._on_message_action,
             )
             bubble.pack(fill="x")
             self._bubbles.append(bubble)
             previous_sender = None if message.out else message.sender_name
+            if message.media_kind in ("photo", "video"):
+                self._request_media_thumb(
+                    message.chat_id,
+                    message.id,
+                    message.media_kind,
+                )
 
         self.message_area.update_idletasks()
         if scroll_bottom:
@@ -976,6 +1007,9 @@ class MainWindow:
         self.send_button.set_enabled(can_send)
 
     def _send(self) -> None:
+        if self.read_only:
+            self._set_chat_status("Режим только чтения: отправка отключена.", "warning")
+            return
         if self._send_pending or self._destroyed:
             return
         chat_id = self.store.selected_id
@@ -994,11 +1028,44 @@ class MainWindow:
 
         self._send_pending = True
         self._refresh_send_button()
+
+        if self._editing is not None:
+            editing_id = self._editing
+            self._submit(
+                self.service.edit_message(chat_id, editing_id, text),
+                lambda edited: self._on_edit_done(chat_id, editing_id, edited),
+                lambda error: self._on_send_error(chat_id, error),
+            )
+            return
+
+        reply_to = self._reply_to
         self._submit(
-            self.service.send_message(chat_id, text),
+            self.service.send_message(chat_id, text, reply_to=reply_to),
             lambda outcome: self._on_send_done(chat_id, text, outcome),
             lambda error: self._on_send_error(chat_id, error),
         )
+
+    def _on_edit_done(
+        self,
+        chat_id: int,
+        editing_id: int,
+        edited: Message | None,
+    ) -> None:
+        if self._destroyed:
+            return
+        self._send_pending = False
+        self._editing = None
+        self._refresh_send_button()
+        if edited is not None and chat_id == self._loaded_chat_id:
+            self._messages = [
+                edited if message.id == editing_id else message
+                for message in self._messages
+            ]
+            self._render_messages()
+        if chat_id == self.store.selected_id:
+            self.composer_text.delete("1.0", "end")
+            self._update_composer()
+            self._set_chat_status("Сообщение изменено.", "success")
 
     def _on_send_done(self, chat_id: int, text: str, outcome: SendOutcome) -> None:
         if self._destroyed:
@@ -1008,6 +1075,7 @@ class MainWindow:
 
         if outcome.kind == "sent":
             self._drafts.pop(chat_id, None)
+            self._reply_to = None
             message = outcome.sent_message
             if message is None:
                 message = Message(
@@ -1149,10 +1217,166 @@ class MainWindow:
             return
         p = self.theme.palette
         self.chat_avatar.show(chat.title, seed=chat.id)
+        photo = self._photo(chat.id, 42)
+        if photo is not None:
+            self.chat_avatar.show_photo(photo)
         self.chat_title.configure(text=preview(chat.title, 40))
         self.chat_subtitle.configure(text=chat_subtitle(chat))
         self.chat_avatar.set_background(p.panel)
         self._refresh_send_button()
+
+    # ── Аватарки ─────────────────────────────────────────────────────
+
+    def _avatar_dir(self) -> Path:
+        return self.settings.session_path.parent / "avatars"
+
+    def _photo(self, chat_id: int, size: int) -> tk.PhotoImage | None:
+        key = (chat_id, size)
+        photo = self._avatar_photos.get(key)
+        if photo is not None:
+            return photo
+        file_path = self._avatar_paths.get(chat_id)
+        if file_path is None:
+            return None
+        photo = load_photoimage(file_path, size=size, circular=True)
+        if photo is not None:
+            self._avatar_photos[key] = photo
+        return photo
+
+    def _request_avatar(self, chat_id: int, *, photo_available: bool = True) -> None:
+        if (
+            not photo_available
+            or chat_id in self._avatar_requested
+            or chat_id in self._avatar_paths
+            or len(self._avatar_requested) >= 12
+        ):
+            return
+        self._avatar_requested.add(chat_id)
+        avatar_dir = self._avatar_dir()
+        try:
+            avatar_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self._avatar_requested.discard(chat_id)
+            return
+        file_path = avatar_dir / f"{chat_id}.jpg"
+        self._submit(
+            self.service.download_avatar(chat_id, file=str(file_path)),
+            lambda result: self._on_avatar_loaded(chat_id, result),
+            lambda _error: self._avatar_requested.discard(chat_id),
+        )
+
+    def _on_avatar_loaded(self, chat_id: int, result: Any) -> None:
+        self._avatar_requested.discard(chat_id)
+        if not result:
+            return
+        self._avatar_paths[chat_id] = Path(result)
+        for size in (32, 38, 42, 46):
+            self._avatar_photos.pop((chat_id, size), None)
+        self._render_chat_list()
+        if self.store.selected_id == chat_id:
+            self._update_chat_header()
+        me_id = self._account.id if self._account is not None else None
+        if chat_id == me_id:
+            self._apply_me_avatar()
+
+    def _apply_me_avatar(self) -> None:
+        if self._account is None or not hasattr(self, "me_avatar"):
+            return
+        photo = self._photo(self._account.id, 38)
+        if photo is not None:
+            self.me_avatar.show_photo(photo)
+        footer_photo = self._photo(self._account.id, 32)
+        if footer_photo is not None:
+            self.footer_avatar.show_photo(footer_photo)
+
+    # ── Медиа-превью ─────────────────────────────────────────────────
+
+    def _media_thumb(self, chat_id: int, message_id: int) -> tk.PhotoImage | None:
+        return self._media_thumbs.get((chat_id, message_id))
+
+    def _request_media_thumb(
+        self,
+        chat_id: int,
+        message_id: int,
+        media_kind: str | None,
+    ) -> None:
+        if media_kind not in ("photo", "video"):
+            return
+        key = (chat_id, message_id)
+        if key in self._media_requested or key in self._media_thumbs:
+            return
+        if len(self._media_requested) >= 24:
+            return
+        self._media_requested.add(key)
+        self._submit(
+            self.service.download_media(chat_id, message_id, thumb=0),
+            lambda result: self._on_media_thumb(chat_id, message_id, result),
+            lambda _error: self._media_requested.discard(key),
+        )
+
+    def _on_media_thumb(self, chat_id: int, message_id: int, result: Any) -> None:
+        self._media_requested.discard((chat_id, message_id))
+        if result is None:
+            return
+        photo = load_photoimage(result, size=260)
+        if photo is None:
+            return
+        self._media_thumbs[(chat_id, message_id)] = photo
+        if self._loaded_chat_id == chat_id:
+            self._render_messages()
+
+    # ── Действия с сообщениями ──────────────────────────────────────
+
+    def _on_message_action(self, action: str, message: Message) -> None:
+        if action == "reply":
+            self._reply_to = message.id
+            self._editing = None
+            self._set_chat_status(f"Ответ на сообщение #{message.id}", "muted")
+            self.composer_text.focus_set()
+        elif action == "edit":
+            self._editing = message.id
+            self._reply_to = None
+            self.composer_text.delete("1.0", "end")
+            self.composer_text.insert("1.0", message.text)
+            self.composer_text.mark_set("insert", "end-1c")
+            self._update_composer()
+            self._set_chat_status("Редактирование сообщения", "muted")
+            self.composer_text.focus_set()
+        elif action == "delete":
+            self._submit(
+                self.service.delete_message(message.chat_id, message.id),
+                lambda _result: self._on_delete_done(message.chat_id, message.id),
+                lambda error: self._set_chat_status(error_text(error), "error"),
+            )
+        elif action == "pin":
+            self._submit(
+                self.service.pin_message(message.chat_id, message.id),
+                lambda _result: self._set_chat_status(
+                    "Сообщение закреплено.",
+                    "success",
+                ),
+                lambda error: self._set_chat_status(error_text(error), "error"),
+            )
+        elif action == "save":
+            self._submit(
+                self.service.forward_to_saved(message.chat_id, [message.id]),
+                lambda _result: self._set_chat_status(
+                    "Сохранено в Избранное.",
+                    "success",
+                ),
+                lambda error: self._set_chat_status(error_text(error), "error"),
+            )
+
+    def _on_delete_done(self, chat_id: int, message_id: int) -> None:
+        if self._destroyed:
+            return
+        if chat_id == self._loaded_chat_id:
+            self._messages = [
+                message for message in self._messages if message.id != message_id
+            ]
+            self._render_messages()
+        if chat_id == self.store.selected_id:
+            self._set_chat_status("Сообщение удалено.", "success")
 
     def _set_status(self, text: str, tone: str) -> None:
         if not hasattr(self, "sidebar_status"):

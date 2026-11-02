@@ -6,6 +6,7 @@ from telegram_personal_messenger.models import (
     Chat,
     Message,
     MessageValidationError,
+    Reaction,
     SendOutcome,
     validate_message,
 )
@@ -51,6 +52,51 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result.kind, "unknown")
         self.assertEqual(result.code, "send_unknown")
         self.assertIsNone(result.sent_message)
+
+    def test_chat_has_avatar_and_forum_metadata_defaults(self):
+        chat = Chat(1, "A")
+        self.assertFalse(chat.photo_available)
+        self.assertIsNone(chat.participants_count)
+        self.assertFalse(chat.is_forum)
+
+        chat = Chat(
+            1,
+            "Group",
+            kind="group",
+            photo_available=True,
+            participants_count=42,
+            is_forum=True,
+        )
+        self.assertTrue(chat.photo_available)
+        self.assertEqual(chat.participants_count, 42)
+        self.assertTrue(chat.is_forum)
+
+    def test_message_metadata_and_reaction_defaults(self):
+        now = datetime(2026, 1, 1, 12, 0)
+        message = Message(1, 2, "text", now)
+        self.assertIsNone(message.media_kind)
+        self.assertIsNone(message.forwarded_from)
+        self.assertFalse(message.pinned)
+        self.assertFalse(message.edited)
+        self.assertIsNone(message.views)
+        self.assertIsNone(message.grouped_id)
+        self.assertEqual(message.reactions, ())
+
+        message = Message(
+            1,
+            2,
+            "text",
+            now,
+            media_kind="photo",
+            pinned=True,
+            edited=True,
+            reactions=(Reaction("👍", 3, True),),
+        )
+        self.assertEqual(message.media_kind, "photo")
+        self.assertTrue(message.pinned)
+        self.assertTrue(message.edited)
+        self.assertEqual(message.reactions[0].emoticon, "👍")
+        self.assertTrue(message.reactions[0].chosen)
 
 
 if __name__ == "__main__":

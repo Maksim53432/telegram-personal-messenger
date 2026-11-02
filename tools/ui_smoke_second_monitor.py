@@ -104,6 +104,12 @@ class FakeService:
     async def resolve_username(self, username: str) -> Chat:
         return Chat(77, "Новый человек", username, "user", is_contact=False)
 
+    async def download_avatar(self, chat_id: int, file: str | None = None):
+        return None
+
+    async def download_media(self, chat_id: int, message_id: int, thumb=None, file=None):
+        return None
+
     def start_listening(self, callback) -> None:
         self.callback = callback
 

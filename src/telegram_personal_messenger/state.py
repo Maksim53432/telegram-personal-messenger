@@ -161,6 +161,34 @@ def message_preview(message: Message) -> str:
     return preview(text, limit=80)
 
 
+def album_groups(messages: list[Message]) -> list[list[Message]]:
+    """Группирует сообщения по альбомам (``grouped_id``).
+
+    Сообщения одного альбома идут подряд и имеют одинаковый ``grouped_id``;
+    обычные сообщения попадают в отдельные группы по одному.
+    """
+
+    groups: list[list[Message]] = []
+    current: list[Message] = []
+    current_id: int | None = None
+    for message in messages:
+        if message.grouped_id is not None:
+            if current and message.grouped_id != current_id:
+                groups.append(current)
+                current = []
+            current.append(message)
+            current_id = message.grouped_id
+        else:
+            if current:
+                groups.append(current)
+                current = []
+                current_id = None
+            groups.append([message])
+    if current:
+        groups.append(current)
+    return groups
+
+
 def _with_default_folders(folders: list[Folder]) -> list[Folder]:
     result = list(folders)
     if not any(folder.kind == "all" for folder in result):

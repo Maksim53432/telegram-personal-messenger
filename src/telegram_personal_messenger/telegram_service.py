@@ -24,7 +24,23 @@ from telethon.errors import (
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession
-from telethon.tl.types import DialogFilter, DialogFilterChatlist, User
+from telethon.tl.types import (
+    DialogFilter,
+    DialogFilterChatlist,
+    InputMessagesFilterDocument,
+    InputMessagesFilterGif,
+    InputMessagesFilterMusic,
+    InputMessagesFilterPhotoVideo,
+    InputMessagesFilterPhotos,
+    InputMessagesFilterRoundVideo,
+    InputMessagesFilterUrl,
+    InputMessagesFilterVideo,
+    InputMessagesFilterVoice,
+    ReactionEmoji,
+    SendMessageCancelAction,
+    SendMessageTypingAction,
+    User,
+)
 
 from . import errors
 from .config import Settings
@@ -37,6 +53,7 @@ from .models import (
     Folder,
     Message,
     MessageValidationError,
+    Reaction,
     SendOutcome,
     validate_message,
 )
@@ -44,6 +61,18 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 MessageCallback = Callable[[Message], Any | Awaitable[Any]]
+
+_MESSAGE_FILTERS = {
+    "photo": InputMessagesFilterPhotos,
+    "video": InputMessagesFilterVideo,
+    "photo_video": InputMessagesFilterPhotoVideo,
+    "voice": InputMessagesFilterVoice,
+    "video_note": InputMessagesFilterRoundVideo,
+    "document": InputMessagesFilterDocument,
+    "music": InputMessagesFilterMusic,
+    "url": InputMessagesFilterUrl,
+    "gif": InputMessagesFilterGif,
+}
 
 
 class TelegramService:
@@ -56,6 +85,7 @@ class TelegramService:
     ) -> None:
         self._settings = settings
         self._entities: dict[int, Any] = {}
+        self._message_cache: dict[tuple[int, int], Any] = {}
         self._me: Account | None = None
         self._listening = False
         self._connect_lock = asyncio.Lock()
@@ -75,22 +105,35 @@ class TelegramService:
         else:
             session = str(settings.session_path)
 
+        proxy = settings.proxy.as_telethon() if settings.proxy is not None else None
+        options: dict[str, Any] = {
+            "request_retries": 0,
+            "connection_retries": 3,
+            "retry_delay": 1,
+            "flood_sleep_threshold": 0,
+            "device_model": "Telegram Personal Messenger",
+            "app_version": "0.2.0",
+            "proxy": proxy,
+        }
+        if settings.proxy is not None and settings.proxy.kind == "mtproto":
+            from telethon.network.connection import (
+                ConnectionTcpMTProxyIntermediate,
+                ConnectionTcpMTProxyRandomizedIntermediate,
+            )
+
+            secret = settings.proxy.secret or ""
+            options["connection"] = (
+                ConnectionTcpMTProxyRandomizedIntermediate
+                if secret.startswith("dd")
+                else ConnectionTcpMTProxyIntermediate
+            )
+
         try:
             self._client = client_factory(
                 session,
                 settings.api_id,
                 settings.api_hash,
-                request_retries=0,
-                connection_retries=3,
-                retry_delay=1,
-                flood_sleep_threshold=0,
-                device_model="Telegram Personal Messenger",
-                app_version="0.2.0",
-                proxy=(
-                    settings.proxy.as_telethon()
-                    if settings.proxy is not None
-                    else None
-                ),
+                **options,
             )
         except Exception as exc:
             raise TelegramServiceError(errors.CONNECTION) from exc
@@ -239,14 +282,18 @@ class TelegramService:
         chat_id: int,
         limit: int = 60,
         offset_id: int = 0,
+        *,
+        filter_type: str | None = None,
     ) -> list[Message]:
         await self._ensure_connected()
         entity = await self._entity(chat_id)
+        message_filter = _MESSAGE_FILTERS.get(filter_type) if filter_type else None
         try:
             messages = await self._client.get_messages(
                 entity,
                 limit=limit,
                 offset_id=offset_id,
+                filter=message_filter,
             )
         except FloodWaitError as exc:
             raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
@@ -259,7 +306,13 @@ class TelegramService:
         result.reverse()
         return result
 
-    async def send_message(self, chat_id: int, text: str) -> SendOutcome:
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_to: int | None = None,
+    ) -> SendOutcome:
         try:
             message_text = validate_message(text)
         except MessageValidationError as exc:
@@ -272,6 +325,7 @@ class TelegramService:
                 entity,
                 message_text,
                 parse_mode=None,
+                reply_to=reply_to,
             )
         except FloodWaitError as exc:
             return SendOutcome(
@@ -330,9 +384,195 @@ class TelegramService:
             entity = await self._entity(chat_id)
             method = getattr(self._client, "send_read_acknowledge", None)
             if method is not None:
-                await method(entity, clear_mentions=True)
+                await method(entity, clear_mentions=True, clear_reactions=True)
         except Exception:
             logger.debug("Не удалось отметить чат прочитанным")
+
+    # ── Действия с сообщениями и чатами ─────────────────────────────
+
+    async def _input_peer(self, chat_id: int) -> Any:
+        entity = await self._entity(chat_id)
+        return await self._client.get_input_entity(entity)
+
+    async def pin_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        *,
+        notify: bool = False,
+        pm_oneside: bool = False,
+    ) -> None:
+        await self._ensure_connected()
+        try:
+            entity = await self._entity(chat_id)
+            await self._client.pin_message(
+                entity,
+                message_id,
+                notify=notify,
+                pm_oneside=pm_oneside,
+            )
+        except FloodWaitError as exc:
+            raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
+
+    async def unpin_message(self, chat_id: int, message_id: int | None = None) -> None:
+        await self._ensure_connected()
+        try:
+            entity = await self._entity(chat_id)
+            await self._client.unpin_message(entity, message_id)
+        except FloodWaitError as exc:
+            raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
+
+    async def edit_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+    ) -> Message | None:
+        await self._ensure_connected()
+        try:
+            entity = await self._entity(chat_id)
+            edited = await self._client.edit_message(
+                entity,
+                message_id,
+                text,
+                parse_mode=None,
+            )
+        except FloodWaitError as exc:
+            raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
+        return self._to_message(edited, chat_id) if edited is not None else None
+
+    async def delete_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        *,
+        revoke: bool = True,
+    ) -> None:
+        await self._ensure_connected()
+        try:
+            entity = await self._entity(chat_id)
+            await self._client.delete_messages(entity, message_id, revoke=revoke)
+        except FloodWaitError as exc:
+            raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
+
+    async def send_reaction(
+        self,
+        chat_id: int,
+        message_id: int,
+        emoticons: list[str],
+        *,
+        big: bool = False,
+    ) -> None:
+        await self._ensure_connected()
+        try:
+            peer = await self._input_peer(chat_id)
+            await self._client(
+                functions.messages.SendReactionRequest(
+                    peer=peer,
+                    msg_id=message_id,
+                    big=big,
+                    reaction=[ReactionEmoji(emoticon=emoji) for emoji in emoticons],
+                )
+            )
+        except FloodWaitError as exc:
+            raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
+
+    async def get_draft(self, chat_id: int) -> str | None:
+        await self._ensure_connected()
+        try:
+            entity = await self._entity(chat_id)
+            drafts = await self._client.get_drafts(entity)
+            if drafts:
+                text = drafts[0].text
+                if text:
+                    return text
+        except Exception:
+            logger.debug("Не удалось прочитать черновик")
+        return None
+
+    async def set_draft(self, chat_id: int, text: str) -> None:
+        await self._ensure_connected()
+        try:
+            peer = await self._input_peer(chat_id)
+            await self._client(
+                functions.messages.SaveDraftRequest(peer=peer, message=text)
+            )
+        except FloodWaitError as exc:
+            raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
+
+    async def set_typing(self, chat_id: int, typing: bool = True) -> None:
+        await self._ensure_connected()
+        try:
+            peer = await self._input_peer(chat_id)
+            action = (
+                SendMessageTypingAction()
+                if typing
+                else SendMessageCancelAction()
+            )
+            await self._client(
+                functions.messages.SetTypingRequest(peer=peer, action=action)
+            )
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
+
+    async def forward_messages(
+        self,
+        chat_id: int,
+        message_ids: list[int],
+        to_chat_id: int,
+        *,
+        as_album: bool = False,
+    ) -> None:
+        await self._ensure_connected()
+        try:
+            entity = await self._entity(chat_id)
+            to_entity = await self._entity(to_chat_id)
+            await self._client.forward_messages(
+                to_entity,
+                message_ids,
+                from_peer=entity,
+                as_album=as_album,
+            )
+        except FloodWaitError as exc:
+            raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
+
+    async def forward_to_saved(
+        self,
+        chat_id: int,
+        message_ids: list[int],
+        *,
+        as_album: bool = False,
+    ) -> None:
+        """Пересылает сообщения в «Избранное» (диалог с самим собой)."""
+
+        await self._ensure_connected()
+        try:
+            entity = await self._entity(chat_id)
+            me = await self._client.get_entity("me")
+            await self._client.forward_messages(
+                me,
+                message_ids,
+                from_peer=entity,
+                as_album=as_album,
+            )
+        except FloodWaitError as exc:
+            raise TelegramServiceError(errors.FLOOD_WAIT, seconds=int(exc.seconds)) from exc
+        except Exception as exc:
+            raise TelegramServiceError(errors.ACTION_FAILED) from exc
 
     # ── Входящие сообщения ──────────────────────────────────────────
 
@@ -428,6 +668,9 @@ class TelegramService:
             archived=bool(getattr(dialog, "archived", False)),
             muted=_is_muted(dialog),
             is_contact=bool(getattr(entity, "contact", False)) and kind == "user",
+            photo_available=bool(getattr(entity, "photo", None)),
+            participants_count=getattr(entity, "participants_count", None),
+            is_forum=bool(getattr(entity, "forum", False)),
         )
 
     def _to_message(self, message: Any, chat_id: int | None = None) -> Message:
@@ -456,16 +699,33 @@ class TelegramService:
         if date is None:
             date = datetime.now(timezone.utc)
 
+        message_id = int(getattr(message, "id", 0) or 0)
+        self._cache_raw_message(message_chat_id, message_id, message)
+
         return Message(
-            id=int(getattr(message, "id", 0) or 0),
+            id=message_id,
             chat_id=message_chat_id,
             text=str(text),
             date=date,
             out=out,
             sender_name=sender_name,
             media=self._media_label(message),
+            media_kind=self._media_kind(message),
             reply_to=getattr(message, "reply_to_msg_id", None),
+            forwarded_from=_forwarded_from(message),
+            pinned=bool(getattr(message, "pinned", False)),
+            edited=getattr(message, "edit_date", None) is not None,
+            views=getattr(message, "views", None),
+            grouped_id=getattr(message, "grouped_id", None),
+            reactions=_reactions(message),
         )
+
+    def _cache_raw_message(self, chat_id: int, message_id: int, message: Any) -> None:
+        if not message_id:
+            return
+        if len(self._message_cache) >= 2000:
+            self._message_cache.pop(next(iter(self._message_cache)), None)
+        self._message_cache[(chat_id, message_id)] = message
 
     async def _cache_senders(self, messages: list[Any]) -> None:
         """Одним запросом подтягивает имена авторов для групповых сообщений."""
@@ -527,6 +787,37 @@ class TelegramService:
             return "Опрос"
         if getattr(message, "dice", None):
             return "Кубик"
+        if getattr(message, "web_preview", None):
+            return "Ссылка"
+        return None
+
+    def _media_kind(self, message: Any) -> str | None:
+        if getattr(message, "sticker", None):
+            return "sticker"
+        if getattr(message, "photo", None):
+            return "photo"
+        if getattr(message, "video_note", None):
+            return "video_note"
+        if getattr(message, "voice", None):
+            return "voice"
+        if getattr(message, "video", None):
+            return "video"
+        if getattr(message, "gif", None):
+            return "gif"
+        if getattr(message, "audio", None):
+            return "audio"
+        if getattr(message, "document", None):
+            return "document"
+        if getattr(message, "geo", None):
+            return "geo"
+        if getattr(message, "contact", None):
+            return "contact"
+        if getattr(message, "poll", None):
+            return "poll"
+        if getattr(message, "dice", None):
+            return "dice"
+        if getattr(message, "web_preview", None):
+            return "webpage"
         return None
 
     async def _entity(self, chat_id: int) -> Any:
@@ -541,6 +832,47 @@ class TelegramService:
             raise TelegramServiceError(errors.MESSAGES_FAILED) from exc
         self._entities[chat_id] = entity
         return entity
+
+    async def download_media(
+        self,
+        chat_id: int,
+        message_id: int,
+        *,
+        thumb: int | None = None,
+        file: Any = None,
+    ) -> Any:
+        """Скачивает медиа сообщения на диск (или в память, если ``file`` нет).
+
+        Возвращает путь или bytes; при ошибке — ``None``.
+        """
+
+        message = self._message_cache.get((chat_id, message_id))
+        if message is None:
+            try:
+                entity = await self._entity(chat_id)
+                fetched = await self._client.get_messages(entity, ids=message_id)
+            except Exception:
+                return None
+            message = fetched[0] if fetched else None
+        if message is None:
+            return None
+        try:
+            return await self._client.download_media(message, file=file, thumb=thumb)
+        except Exception:
+            return None
+
+    async def download_avatar(self, chat_id: int, file: Any = None) -> Any:
+        """Скачивает аватар чата; при отсутствии/ошибке возвращает ``None``."""
+
+        try:
+            entity = await self._entity(chat_id)
+            return await self._client.download_profile_photo(
+                entity,
+                file=file,
+                download_big=False,
+            )
+        except Exception:
+            return None
 
 
 def _display_name(entity: Any) -> str:
@@ -557,6 +889,53 @@ def _display_name(entity: Any) -> str:
         return str(username)
     entity_id = getattr(entity, "id", "")
     return str(entity_id) if entity_id else "Без имени"
+
+
+def _reactions(message: Any) -> tuple[Reaction, ...]:
+    raw = getattr(message, "reactions", None)
+    results = getattr(raw, "results", None) or []
+    reactions: list[Reaction] = []
+    for item in results:
+        emoji = getattr(item, "reaction", None)
+        if emoji is None:
+            continue
+        if isinstance(emoji, str):
+            emoticon = emoji
+        else:
+            emoticon = getattr(emoji, "emoticon", None)
+            if not emoticon:
+                document_id = getattr(emoji, "document_id", None)
+                emoticon = str(document_id) if document_id is not None else None
+        if not emoticon:
+            continue
+        reactions.append(
+            Reaction(
+                emoticon=str(emoticon),
+                count=int(getattr(item, "count", 0) or 0),
+                chosen=getattr(item, "chosen_order", None) is not None,
+            )
+        )
+    return tuple(reactions)
+
+
+def _forwarded_from(message: Any) -> str | None:
+    forward = getattr(message, "forward", None)
+    if forward is None:
+        return None
+    sender = getattr(forward, "sender", None)
+    if sender is not None:
+        return _display_name(sender)
+    chat = getattr(forward, "chat", None)
+    if chat is not None:
+        return _display_name(chat)
+    original = getattr(forward, "original_fwd", None)
+    if original is not None:
+        return (
+            getattr(original, "from_name", None)
+            or getattr(original, "post_author", None)
+            or None
+        )
+    return None
 
 
 def _text_value(value: Any) -> str:

@@ -129,6 +129,18 @@ class FakeClient:
         self.dialog_limit = "unset"
         self.session = SimpleNamespace(save=lambda: "session-value")
         self.connected_calls = 0
+        self.download_calls = []
+        self.download_result = b"media-bytes"
+        self.download_error = None
+        self.avatar_calls = []
+        self.raw_calls = []
+        self.pin_calls = []
+        self.unpin_calls = []
+        self.edit_calls = []
+        self.delete_calls = []
+        self.forward_calls = []
+        self.drafts = []
+        self.edited_message = None
 
     def is_connected(self):
         return self.connected
@@ -158,25 +170,61 @@ class FakeClient:
         return self.dialogs
 
     async def __call__(self, request):
-        return SimpleNamespace(filters=self.filters)
+        if request.__class__.__name__ == "GetDialogFiltersRequest":
+            return SimpleNamespace(filters=self.filters)
+        self.raw_calls.append(request)
+        return True
 
     async def get_entity(self, target):
         if target == "missing":
             raise ValueError("private lookup detail")
         return self.entity
 
-    async def get_messages(self, entity, limit=60, offset_id=0):
-        self.message_calls.append((entity, limit, offset_id))
+    async def get_input_entity(self, entity):
+        return entity
+
+    async def get_drafts(self, entity):
+        return self.drafts
+
+    async def get_messages(self, entity, limit=60, offset_id=0, filter=None):
+        self.message_calls.append((entity, limit, offset_id, filter))
         return self.messages
 
-    async def send_message(self, entity, text, parse_mode=None):
-        self.send_calls.append((entity, text, parse_mode))
+    async def send_message(self, entity, text, parse_mode=None, reply_to=None):
+        self.send_calls.append((entity, text, parse_mode, reply_to))
         if self.send_error is not None:
             raise self.send_error
         return self.sent_message
 
-    async def send_read_acknowledge(self, entity, clear_mentions=False):
+    async def send_read_acknowledge(self, entity, clear_mentions=False, clear_reactions=False):
         self.read_entity = entity
+        self.read_clear_reactions = clear_reactions
+
+    async def pin_message(self, entity, message_id, notify=False, pm_oneside=False):
+        self.pin_calls.append((entity, message_id, notify, pm_oneside))
+
+    async def unpin_message(self, entity, message_id=None):
+        self.unpin_calls.append((entity, message_id))
+
+    async def edit_message(self, entity, message_id, text, parse_mode=None):
+        self.edit_calls.append((entity, message_id, text, parse_mode))
+        return self.edited_message
+
+    async def delete_messages(self, entity, message_ids, revoke=True):
+        self.delete_calls.append((entity, message_ids, revoke))
+
+    async def forward_messages(self, to_entity, message_ids, from_peer=None, as_album=None):
+        self.forward_calls.append((to_entity, message_ids, from_peer, as_album))
+
+    async def download_media(self, message, file=None, thumb=None):
+        self.download_calls.append((message, file, thumb))
+        if self.download_error is not None:
+            raise self.download_error
+        return file if file is not None else self.download_result
+
+    async def download_profile_photo(self, entity, file=None, download_big=False):
+        self.avatar_calls.append((entity, file, download_big))
+        return file
 
 
 class TelegramServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -194,6 +242,35 @@ class TelegramServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await service.is_authorized())
         self.assertEqual(client.dialog_limit, "unset")
+
+    def test_mtproto_proxy_selects_randomized_connection(self):
+        captured = {}
+
+        def factory(*args, **kwargs):
+            captured.update(kwargs)
+            return FakeClient()
+
+        settings = Settings(
+            12345,
+            "x" * 32,
+            Path("/tmp/tpm-test/session"),
+            proxy=Proxy(
+                "mtproto",
+                "127.0.0.1",
+                1443,
+                secret="ddf5c5a473cdd1b84abc8ebd653f6404d2",
+            ),
+        )
+        TelegramService(settings, client_factory=factory)
+
+        self.assertEqual(
+            captured["proxy"],
+            ("127.0.0.1", 1443, "ddf5c5a473cdd1b84abc8ebd653f6404d2"),
+        )
+        self.assertEqual(
+            captured["connection"].__name__,
+            "ConnectionTcpMTProxyRandomizedIntermediate",
+        )
 
     def test_proxy_is_passed_to_client_factory(self):
         captured = {}
@@ -336,7 +413,7 @@ class TelegramServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(older.media, "Файл: report.pdf")
         self.assertEqual(older.reply_to, 2)
         self.assertTrue(newer.out)
-        self.assertEqual(client.message_calls[0][1:], (20, 0))
+        self.assertEqual(client.message_calls[0][1:], (20, 0, None))
 
     async def test_send_message_success_not_retried(self):
         user = User(id=7, first_name="Alex", username="alex")
@@ -350,7 +427,7 @@ class TelegramServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.kind, "sent")
         self.assertEqual(outcome.sent_message.text, "keep _underscores_")
-        self.assertEqual(client.send_calls, [(user, text, None)])
+        self.assertEqual(client.send_calls, [(user, text, None, None)])
         self.assertEqual(len(client.send_calls), 1)
 
     async def test_send_rejects_empty_text_without_network_call(self):
@@ -360,6 +437,17 @@ class TelegramServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.kind, "failed")
         self.assertEqual(outcome.code, "empty")
+
+    async def test_send_message_supports_reply(self):
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        client.sent_message = FakeMessage(5, 7, "reply", out=True)
+        service = self.make_service(client)
+
+        outcome = await service.send_message(7, "reply", reply_to=3)
+
+        self.assertEqual(outcome.kind, "sent")
+        self.assertEqual(client.send_calls, [(client.entity, "reply", None, 3)])
 
     async def test_send_timeout_is_unknown_and_not_retried(self):
         client = FakeClient()
@@ -489,6 +577,220 @@ class TelegramServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.mark_read(7)
 
         self.assertIs(client.read_entity, entity)
+
+    def test_message_maps_metadata_reactions_and_forward(self):
+        from types import SimpleNamespace
+
+        forward = SimpleNamespace(
+            sender=User(id=7, first_name="Alex", last_name="Smith"),
+            chat=None,
+            original_fwd=None,
+        )
+        raw = SimpleNamespace(
+            id=42,
+            chat_id=7,
+            message="hello",
+            text="hello",
+            out=True,
+            sender=None,
+            sender_id=None,
+            date=NOW,
+            reply_to_msg_id=1,
+            pinned=True,
+            edit_date=NOW,
+            views=123,
+            grouped_id=9,
+            reactions=SimpleNamespace(
+                results=[
+                    SimpleNamespace(reaction="👍", count=3, chosen_order=0),
+                    SimpleNamespace(reaction="🔥", count=1, chosen_order=None),
+                ]
+            ),
+            forward=forward,
+            sticker=None,
+            photo=None,
+            video_note=None,
+            voice=None,
+            video=None,
+            gif=None,
+            audio=None,
+            document=None,
+            geo=None,
+            contact=None,
+            poll=None,
+            dice=None,
+            web_preview=None,
+        )
+        service = self.make_service(FakeClient())
+
+        message = service._to_message(raw)
+
+        self.assertEqual(message.id, 42)
+        self.assertTrue(message.pinned)
+        self.assertTrue(message.edited)
+        self.assertEqual(message.views, 123)
+        self.assertEqual(message.grouped_id, 9)
+        self.assertEqual(message.reply_to, 1)
+        self.assertEqual(message.forwarded_from, "Alex Smith")
+        self.assertEqual(
+            [(reaction.emoticon, reaction.count, reaction.chosen) for reaction in message.reactions],
+            [("👍", 3, True), ("🔥", 1, False)],
+        )
+
+    def test_media_kind_is_detected(self):
+        from types import SimpleNamespace
+
+        def message_with(**fields):
+            base = dict(
+                id=1, chat_id=7, message="", text="", out=False,
+                sender=None, sender_id=None, date=NOW, reply_to_msg_id=None,
+                pinned=False, edit_date=None, views=None, grouped_id=None,
+                reactions=None, forward=None,
+                sticker=None, photo=None, video_note=None, voice=None,
+                video=None, gif=None, audio=None, document=None, geo=None,
+                contact=None, poll=None, dice=None, web_preview=None,
+            )
+            base.update(fields)
+            return SimpleNamespace(**base)
+
+        service = self.make_service(FakeClient())
+        self.assertEqual(service._media_kind(message_with(photo=object())), "photo")
+        self.assertEqual(service._media_kind(message_with(sticker=object())), "sticker")
+        self.assertEqual(service._media_kind(message_with(document=object())), "document")
+        self.assertIsNone(service._media_kind(message_with()))
+
+    async def test_download_media_uses_cached_message(self):
+        from types import SimpleNamespace
+
+        client = FakeClient()
+        service = self.make_service(client)
+        raw = SimpleNamespace(id=5, chat_id=7, message="x")
+        service._cache_raw_message(7, 5, raw)
+
+        result = await service.download_media(7, 5, file="/tmp/out.bin", thumb=0)
+
+        self.assertEqual(result, "/tmp/out.bin")
+        self.assertEqual(client.download_calls, [(raw, "/tmp/out.bin", 0)])
+
+    async def test_download_media_returns_none_on_error(self):
+        from types import SimpleNamespace
+
+        client = FakeClient()
+        client.download_error = RuntimeError("boom")
+        service = self.make_service(client)
+        service._cache_raw_message(7, 5, SimpleNamespace(id=5, chat_id=7, message="x"))
+
+        self.assertIsNone(await service.download_media(7, 5, file="/tmp/out.bin"))
+
+    async def test_download_avatar_uses_profile_photo(self):
+        client = FakeClient()
+        entity = User(id=7, first_name="Alex")
+        client.entity = entity
+        service = self.make_service(client)
+
+        result = await service.download_avatar(7, file="/tmp/avatar.jpg")
+
+        self.assertEqual(result, "/tmp/avatar.jpg")
+        self.assertEqual(client.avatar_calls, [(entity, "/tmp/avatar.jpg", False)])
+
+    async def test_pin_and_unpin_delegate_to_client(self):
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        service = self.make_service(client)
+
+        await service.pin_message(7, 42, notify=True, pm_oneside=True)
+        await service.unpin_message(7, 42)
+
+        self.assertEqual(client.pin_calls, [(client.entity, 42, True, True)])
+        self.assertEqual(client.unpin_calls, [(client.entity, 42)])
+
+    async def test_edit_and_delete_delegate_to_client(self):
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        client.edited_message = SimpleNamespace(
+            id=42, chat_id=7, message="edited", text="edited", out=True,
+            sender=None, sender_id=None, date=NOW, reply_to_msg_id=None,
+            pinned=False, edit_date=NOW, views=None, grouped_id=None,
+            reactions=None, forward=None,
+        )
+        service = self.make_service(client)
+
+        edited = await service.edit_message(7, 42, "edited")
+        await service.delete_message(7, 42, revoke=False)
+
+        self.assertEqual(edited.id, 42)
+        self.assertEqual(client.edit_calls, [(client.entity, 42, "edited", None)])
+        self.assertEqual(client.delete_calls, [(client.entity, 42, False)])
+
+    async def test_send_reaction_uses_raw_request(self):
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        service = self.make_service(client)
+
+        await service.send_reaction(7, 42, ["👍", "🔥"])
+
+        self.assertEqual(len(client.raw_calls), 1)
+        request = client.raw_calls[0]
+        self.assertEqual(request.__class__.__name__, "SendReactionRequest")
+        self.assertEqual(request.msg_id, 42)
+        self.assertEqual([r.emoticon for r in request.reaction], ["👍", "🔥"])
+
+    async def test_set_draft_and_get_draft(self):
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        client.drafts = [SimpleNamespace(text="черновик")]
+        service = self.make_service(client)
+
+        self.assertEqual(await service.get_draft(7), "черновик")
+
+        await service.set_draft(7, "новый черновик")
+        self.assertEqual(len(client.raw_calls), 1)
+        self.assertEqual(client.raw_calls[0].__class__.__name__, "SaveDraftRequest")
+
+    async def test_set_typing_uses_raw_request(self):
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        service = self.make_service(client)
+
+        await service.set_typing(7, typing=True)
+
+        self.assertEqual(len(client.raw_calls), 1)
+        self.assertEqual(client.raw_calls[0].__class__.__name__, "SetTypingRequest")
+
+    async def test_forward_messages_delegates_to_client(self):
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        service = self.make_service(client)
+
+        await service.forward_messages(7, [1, 2], 8, as_album=True)
+
+        self.assertEqual(
+            client.forward_calls,
+            [(client.entity, [1, 2], client.entity, True)],
+        )
+
+    async def test_forward_to_saved_delegates_to_client(self):
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        service = self.make_service(client)
+
+        await service.forward_to_saved(7, [5])
+
+        self.assertEqual(
+            client.forward_calls,
+            [(client.entity, [5], client.entity, False)],
+        )
+
+    async def test_get_messages_passes_media_filter(self):
+        from telethon.tl.types import InputMessagesFilterPhotoVideo
+
+        client = FakeClient()
+        client.entity = User(id=7, first_name="Alex")
+        service = self.make_service(client)
+
+        await service.get_messages(7, limit=10, filter_type="photo_video")
+
+        self.assertIs(client.message_calls[0][3], InputMessagesFilterPhotoVideo)
 
 
 if __name__ == "__main__":

@@ -295,3 +295,35 @@ class ProxyConfigTests(unittest.TestCase):
 
     def test_empty_proxy_is_none(self):
         self.assertIsNone(config.parse_proxy("  "))
+
+
+class MtprotoProxyConfigTests(unittest.TestCase):
+    URL = (
+        "https://t.me/proxy?server=127.0.0.1&port=1443"
+        "&secret=ddf5c5a473cdd1b84abc8ebd653f6404d2"
+    )
+
+    def test_parses_tme_proxy_link(self):
+        proxy = config.parse_proxy(self.URL)
+
+        self.assertEqual(proxy.kind, "mtproto")
+        self.assertEqual(proxy.host, "127.0.0.1")
+        self.assertEqual(proxy.port, 1443)
+        self.assertEqual(proxy.secret, "ddf5c5a473cdd1b84abc8ebd653f6404d2")
+        self.assertEqual(
+            proxy.as_telethon(),
+            ("127.0.0.1", 1443, "ddf5c5a473cdd1b84abc8ebd653f6404d2"),
+        )
+
+    def test_parses_tg_scheme(self):
+        proxy = config.parse_proxy(
+            "tg://proxy?server=127.0.0.1&port=1443&secret=ddf5c5a473cdd1b84abc8ebd653f6404d2"
+        )
+        self.assertEqual(proxy.kind, "mtproto")
+        self.assertEqual(proxy.port, 1443)
+
+    def test_mtproto_link_requires_all_fields(self):
+        with self.assertRaises(config.CredentialError):
+            config.parse_proxy("https://t.me/proxy?server=127.0.0.1&port=1443")
+        with self.assertRaises(config.CredentialError):
+            config.parse_proxy("https://t.me/proxy?server=&port=1443&secret=dd00")

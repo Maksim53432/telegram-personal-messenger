@@ -15,6 +15,21 @@ MAX_MESSAGE_LENGTH = 4096
 ChatKind = Literal["user", "bot", "group", "channel"]
 FolderKind = Literal["all", "archive", "custom"]
 OutcomeKind = Literal["sent", "failed", "unknown"]
+MediaKind = Literal[
+    "photo",
+    "video",
+    "voice",
+    "video_note",
+    "sticker",
+    "gif",
+    "document",
+    "audio",
+    "contact",
+    "geo",
+    "poll",
+    "dice",
+    "webpage",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +61,9 @@ class Chat:
     archived: bool = False
     muted: bool = False
     is_contact: bool = False
+    photo_available: bool = False
+    participants_count: int | None = None
+    is_forum: bool = False
 
     @property
     def is_user(self) -> bool:
@@ -65,6 +83,15 @@ class Chat:
 
 
 @dataclass(frozen=True, slots=True)
+class Reaction:
+    """Одна реакция на сообщение."""
+
+    emoticon: str
+    count: int
+    chosen: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     """Одно сообщение в переписке."""
 
@@ -75,7 +102,14 @@ class Message:
     out: bool = False
     sender_name: str = ""
     media: str | None = None
+    media_kind: MediaKind | None = None
     reply_to: int | None = None
+    forwarded_from: str | None = None
+    pinned: bool = False
+    edited: bool = False
+    views: int | None = None
+    grouped_id: int | None = None
+    reactions: tuple[Reaction, ...] = ()
 
     @property
     def is_empty(self) -> bool:

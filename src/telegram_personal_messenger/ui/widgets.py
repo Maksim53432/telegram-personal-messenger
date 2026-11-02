@@ -119,7 +119,7 @@ class ScrollableFrame(tk.Frame):
 
 
 class Avatar(tk.Canvas):
-    """Круглая аватарка с инициалами."""
+    """Круглая аватарка с инициалами; умеет показывать фото."""
 
     def __init__(
         self,
@@ -131,6 +131,7 @@ class Avatar(tk.Canvas):
         self.theme = theme
         self.size = size
         self._bg = bg or theme.palette.sidebar
+        self._photo: tk.PhotoImage | None = None
         super().__init__(
             parent,
             width=size,
@@ -141,6 +142,7 @@ class Avatar(tk.Canvas):
         )
 
     def show(self, title: str, seed: int | str | None = None) -> None:
+        self._photo = None
         self.delete("all")
         color = avatar_color(seed if seed is not None else title)
         self.create_oval(0, 0, self.size, self.size, fill=color, outline="")
@@ -151,6 +153,15 @@ class Avatar(tk.Canvas):
             fill="#FFFFFF",
             font=self.theme.font(max(9, int(self.size * 0.33)), "bold"),
         )
+
+    def show_photo(self, photo: tk.PhotoImage) -> None:
+        """Показывает уже подготовленное круглое изображение."""
+
+        if photo is None:
+            return
+        self._photo = photo
+        self.delete("all")
+        self.create_image(0, 0, image=photo, anchor="nw")
 
     def set_background(self, color: str) -> None:
         self._bg = color
@@ -411,6 +422,7 @@ class ChatRow(tk.Frame):
         selected: bool,
         on_click: Callable[[int], None],
         scroll: ScrollableFrame,
+        photo: tk.PhotoImage | None = None,
     ) -> None:
         self.theme = theme
         self.palette = theme.palette
@@ -429,6 +441,8 @@ class ChatRow(tk.Frame):
             bg=self._normal_bg,
         )
         self.avatar.show(chat.title, seed=chat.id)
+        if photo is not None:
+            self.avatar.show_photo(photo)
         self.avatar.grid(row=0, column=0, padx=(12, 10), pady=10)
 
         text = tk.Frame(self, bg=self._normal_bg)
@@ -554,10 +568,14 @@ class MessageBubble(tk.Frame):
         show_sender: bool,
         wraplength: int,
         scroll: ScrollableFrame,
+        media_photo: tk.PhotoImage | None = None,
+        on_action: Callable[[str, Message], None] | None = None,
     ) -> None:
         self.theme = theme
         self.palette = theme.palette
         self._message = message
+        self._media_photo = media_photo
+        self._on_action = on_action
         super().__init__(parent, bg=self.palette.window)
         self.wraplength = wraplength
 
@@ -589,7 +607,31 @@ class MessageBubble(tk.Frame):
             sender.grid(row=row, column=0, sticky="w", pady=(0, 3))
             row += 1
 
-        if message.media:
+        if message.forwarded_from:
+            forwarded = tk.Label(
+                bubble,
+                text=f"Переслано от {message.forwarded_from}",
+                bg=bubble_bg,
+                fg=self.palette.accent if not out else self.palette.text_soft,
+                font=self.theme.font(8),
+                anchor="w",
+                justify="left",
+                wraplength=wraplength,
+            )
+            forwarded.grid(row=row, column=0, sticky="w", pady=(0, 2))
+            row += 1
+
+        if media_photo is not None:
+            media = tk.Label(
+                bubble,
+                image=media_photo,
+                bg=bubble_bg,
+                bd=0,
+                highlightthickness=0,
+            )
+            media.grid(row=row, column=0, sticky="w", pady=(0, 2))
+            row += 1
+        elif message.media:
             media = tk.Label(
                 bubble,
                 text=message.media,
@@ -621,15 +663,40 @@ class MessageBubble(tk.Frame):
         else:
             self.text_label = None
 
+        meta_text = format_message_time(message.date)
+        if message.out:
+            meta_text = "✓ " + meta_text
+        if message.edited:
+            meta_text += " · изм."
         meta = tk.Frame(bubble, bg=bubble_bg)
         meta.grid(row=row, column=0, sticky="e", pady=(3, 0))
         tk.Label(
             meta,
-            text=format_message_time(message.date),
+            text=meta_text,
             bg=bubble_bg,
             fg=meta_color,
             font=self.theme.font(8),
         ).pack(side="right")
+        row += 1
+
+        if message.reactions:
+            reactions = tk.Frame(bubble, bg=bubble_bg)
+            reactions.grid(row=row, column=0, sticky="w", pady=(3, 0))
+            for reaction in message.reactions:
+                chip_bg = (
+                    self.palette.active
+                    if reaction.chosen
+                    else self.palette.surface_alt
+                )
+                tk.Label(
+                    reactions,
+                    text=f"{reaction.emoticon} {reaction.count}",
+                    bg=chip_bg,
+                    fg=self.palette.text,
+                    font=self.theme.font(8),
+                    padx=6,
+                    pady=1,
+                ).pack(side="left", padx=(0, 4))
 
         scroll.bind_wheel(self)
         self._bind_copy_menu(self)
@@ -646,23 +713,52 @@ class MessageBubble(tk.Frame):
 
     def _show_copy_menu(self, event: tk.Event) -> str:
         text = (self._message.text or "").strip()
-        if not text:
+        if not text and self._on_action is None:
             return "break"
-        if getattr(self, "_copy_menu", None) is None:
-            self._copy_menu = tk.Menu(
-                self,
-                tearoff=0,
-                bg=self.palette.surface_alt,
-                fg=self.palette.text,
-                activebackground=self.palette.active,
-                activeforeground=self.palette.white,
-                bd=0,
-                font=self.theme.font(9),
+
+        if getattr(self, "_copy_menu", None) is not None:
+            self._copy_menu.destroy()
+        self._copy_menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg=self.palette.surface_alt,
+            fg=self.palette.text,
+            activebackground=self.palette.active,
+            activeforeground=self.palette.white,
+            bd=0,
+            font=self.theme.font(9),
+        )
+
+        if self._on_action is not None:
+            self._copy_menu.add_command(
+                label="Ответить",
+                command=lambda: self._on_action("reply", self._message),
+            )
+            if self._message.out:
+                self._copy_menu.add_command(
+                    label="Изменить",
+                    command=lambda: self._on_action("edit", self._message),
+                )
+            self._copy_menu.add_command(
+                label="Закрепить",
+                command=lambda: self._on_action("pin", self._message),
             )
             self._copy_menu.add_command(
-                label="Копировать текст",
-                command=lambda: self._copy_text((self._message.text or "").strip()),
+                label="В Избранное",
+                command=lambda: self._on_action("save", self._message),
             )
+            self._copy_menu.add_command(
+                label="Удалить",
+                command=lambda: self._on_action("delete", self._message),
+            )
+            self._copy_menu.add_separator()
+
+        if text:
+            self._copy_menu.add_command(
+                label="Копировать текст",
+                command=lambda: self._copy_text(text),
+            )
+
         try:
             self._copy_menu.tk_popup(event.x_root, event.y_root)
         finally:

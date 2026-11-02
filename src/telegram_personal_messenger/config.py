@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import hexdigits
 from typing import Any, Literal, Mapping
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from dotenv import dotenv_values
 
@@ -36,14 +36,19 @@ class CredentialError(ValueError):
 class Proxy:
     """Локальный SOCKS/HTTP-прокси для MTProto."""
 
-    kind: Literal["socks5", "socks4", "http"]
+    kind: Literal["socks5", "socks4", "http", "mtproto"]
     host: str
     port: int
     username: str | None = field(default=None, repr=False)
     password: str | None = field(default=None, repr=False)
+    secret: str | None = field(default=None, repr=False)
     rdns: bool = True
 
-    def as_telethon(self) -> dict[str, Any]:
+    def as_telethon(self) -> dict[str, Any] | tuple[str, int, str]:
+        if self.kind == "mtproto":
+            if not self.secret:
+                raise CredentialError("Для MTProto-прокси не указан secret.")
+            return (self.host, self.port, self.secret)
         return {
             "proxy_type": self.kind,
             "addr": self.host,
@@ -130,9 +135,14 @@ def parse_proxy(value: str) -> Proxy | None:
     kind = parsed.scheme.lower()
     if kind == "socks5h":
         kind = "socks5"
+
+    if kind == "mtproxy" or _is_mtproto_link(parsed):
+        return _parse_mtproto_link(parsed)
+
     if kind not in ("socks5", "socks4", "http"):
         raise CredentialError(
-            "TG_PROXY должен начинаться с socks5://, socks5h://, socks4:// или http://."
+            "TG_PROXY должен быть socks5://, socks5h://, socks4://, http:// "
+            "или ссылкой t.me/proxy."
         )
     try:
         port = parsed.port
@@ -149,6 +159,33 @@ def parse_proxy(value: str) -> Proxy | None:
         port=port,
         username=unquote(parsed.username) if parsed.username else None,
         password=unquote(parsed.password) if parsed.password else None,
+        rdns=True,
+    )
+
+
+def _is_mtproto_link(parsed) -> bool:
+    if parsed.scheme.lower() in ("tg", "mtproxy"):
+        return True
+    return parsed.netloc.lower() in ("t.me", "telegram.me") and "proxy" in parsed.path
+
+
+def _parse_mtproto_link(parsed) -> Proxy:
+    query = parse_qs(parsed.query)
+    server = (query.get("server") or [""])[0].strip()
+    secret = (query.get("secret") or [""])[0].strip()
+    raw_port = (query.get("port") or [""])[0].strip()
+    if not server or not secret or not raw_port.isdecimal():
+        raise CredentialError(
+            "Ссылка MTProto-прокси должна содержать server, port и secret."
+        )
+    port = int(raw_port)
+    if not (1 <= port <= 65535):
+        raise CredentialError("В ссылке MTProto-прокси указан неверный порт.")
+    return Proxy(
+        kind="mtproto",
+        host=server,
+        port=port,
+        secret=secret,
         rdns=True,
     )
 

@@ -1,3 +1,4 @@
 Telethon==1.45.0
 python-dotenv==1.2.4
 python-socks==3.2.1
+Pillow==13.0.0
