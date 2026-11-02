@@ -92,6 +92,15 @@ TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 python -m unittest discover -v
 ```
 
+UI-проверку на втором мониторе можно запустить отдельно:
+
+```bash
+python tools/ui_smoke_second_monitor.py --seconds 4
+```
+
+Подробности про Mango, `mmsg` и безопасное перемещение окна без перехвата
+фокуса — в [docs/second-monitor.md](docs/second-monitor.md).
+
 Тесты не используют реальный аккаунт и не отправляют сообщения. Для запуска без
 `pip install -e .` можно указать путь к пакету:
 
@@ -119,6 +128,9 @@ src/telegram_personal_messenger/
     theme.py                        тёмная тема и шрифты
     text.py                         русские подписи и ошибки
 tests/                              unit-тесты на моках
+tools/second_monitor.py             перемещение тестовых окон в Mango
+tools/ui_smoke_second_monitor.py    UI-smoke на втором мониторе
+docs/second-monitor.md              настройка второго монитора
 docs/superpowers/                   исторические документы первой версии
 ```
 
