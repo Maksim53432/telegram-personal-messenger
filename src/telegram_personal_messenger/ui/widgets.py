@@ -557,6 +557,7 @@ class MessageBubble(tk.Frame):
     ) -> None:
         self.theme = theme
         self.palette = theme.palette
+        self._message = message
         super().__init__(parent, bg=self.palette.window)
         self.wraplength = wraplength
 
@@ -631,11 +632,49 @@ class MessageBubble(tk.Frame):
         ).pack(side="right")
 
         scroll.bind_wheel(self)
+        self._bind_copy_menu(self)
 
     def set_wraplength(self, wraplength: int) -> None:
         self.wraplength = wraplength
         if self.text_label is not None:
             self.text_label.configure(wraplength=wraplength)
+
+    def _bind_copy_menu(self, widget: tk.Misc) -> None:
+        widget.bind("<Button-3>", self._show_copy_menu, add="+")
+        for child in widget.winfo_children():
+            self._bind_copy_menu(child)
+
+    def _show_copy_menu(self, event: tk.Event) -> str:
+        text = (self._message.text or "").strip()
+        if not text:
+            return "break"
+        if getattr(self, "_copy_menu", None) is None:
+            self._copy_menu = tk.Menu(
+                self,
+                tearoff=0,
+                bg=self.palette.surface_alt,
+                fg=self.palette.text,
+                activebackground=self.palette.active,
+                activeforeground=self.palette.white,
+                bd=0,
+                font=self.theme.font(9),
+            )
+            self._copy_menu.add_command(
+                label="Копировать текст",
+                command=lambda: self._copy_text((self._message.text or "").strip()),
+            )
+        try:
+            self._copy_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._copy_menu.grab_release()
+        return "break"
+
+    def _copy_text(self, text: str) -> None:
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        except tk.TclError:
+            pass
 
 
 class EmptyState(tk.Frame):
