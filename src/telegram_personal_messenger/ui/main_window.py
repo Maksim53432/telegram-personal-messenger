@@ -76,6 +76,8 @@ class MainWindow:
         self._avatar_requested: set[int] = set()
         self._media_thumbs: dict[tuple[int, int], tk.PhotoImage] = {}
         self._media_requested: set[tuple[int, int]] = set()
+        self._media_render_after_id: str | None = None
+        self._chat_rows: dict[int, Any] = {}
         self._destroyed = False
         self._closing = False
         self._login_view: LoginView | None = None
@@ -619,6 +621,7 @@ class MainWindow:
     def _render_chat_list(self, reset_scroll: bool = False) -> None:
         position = 0.0 if reset_scroll else self.chat_list.yview()[0]
         self.chat_list.clear(reset_scroll=reset_scroll)
+        self._chat_rows = {}
 
         query = self.store.query.strip()
         if query.startswith("@") and len(query) > 1:
@@ -655,9 +658,9 @@ class MainWindow:
                 photo=photo,
             )
             row.pack(fill="x")
-            if chat.photo_available:
-                self._request_avatar(chat.id, photo_available=True)
+            self._chat_rows[chat.id] = row
 
+        self._fill_avatars()
         self.chat_list.update_idletasks()
         if not reset_scroll:
             self.chat_list.canvas.yview_moveto(position)
@@ -1248,7 +1251,7 @@ class MainWindow:
             not photo_available
             or chat_id in self._avatar_requested
             or chat_id in self._avatar_paths
-            or len(self._avatar_requested) >= 12
+            or len(self._avatar_requested) >= 8
         ):
             return
         self._avatar_requested.add(chat_id)
@@ -1265,6 +1268,17 @@ class MainWindow:
             lambda _error: self._avatar_requested.discard(chat_id),
         )
 
+    def _fill_avatars(self) -> None:
+        """Заполняет очередь загрузки аватарок, не перерисовывая список."""
+
+        if len(self._avatar_requested) >= 8:
+            return
+        for chat in self.store.visible_chats():
+            if len(self._avatar_requested) >= 8:
+                break
+            if chat.photo_available:
+                self._request_avatar(chat.id, photo_available=True)
+
     def _on_avatar_loaded(self, chat_id: int, result: Any) -> None:
         self._avatar_requested.discard(chat_id)
         if not result:
@@ -1272,12 +1286,17 @@ class MainWindow:
         self._avatar_paths[chat_id] = Path(result)
         for size in (32, 38, 42, 46):
             self._avatar_photos.pop((chat_id, size), None)
-        self._render_chat_list()
+        row = self._chat_rows.get(chat_id)
+        if row is not None:
+            photo = self._photo(chat_id, 46)
+            if photo is not None:
+                row.set_avatar_photo(photo)
         if self.store.selected_id == chat_id:
             self._update_chat_header()
         me_id = self._account.id if self._account is not None else None
         if chat_id == me_id:
             self._apply_me_avatar()
+        self._fill_avatars()
 
     def _apply_me_avatar(self) -> None:
         if self._account is None or not hasattr(self, "me_avatar"):
@@ -1323,6 +1342,19 @@ class MainWindow:
             return
         self._media_thumbs[(chat_id, message_id)] = photo
         if self._loaded_chat_id == chat_id:
+            self._schedule_messages_render()
+
+    def _schedule_messages_render(self) -> None:
+        if self._media_render_after_id is not None or self._destroyed:
+            return
+        self._media_render_after_id = self.root.after(
+            120,
+            self._render_messages_debounced,
+        )
+
+    def _render_messages_debounced(self) -> None:
+        self._media_render_after_id = None
+        if not self._destroyed and self._loaded_chat_id is not None:
             self._render_messages()
 
     # ── Действия с сообщениями ──────────────────────────────────────
@@ -1471,6 +1503,7 @@ class MainWindow:
             "_refresh_after_id",
             "_resize_after_id",
             "_status_after_id",
+            "_media_render_after_id",
         ):
             after_id = getattr(self, attribute, None)
             if after_id is not None:

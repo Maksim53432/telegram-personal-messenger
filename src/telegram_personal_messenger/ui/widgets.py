@@ -520,6 +520,10 @@ class ChatRow(tk.Frame):
 
         scroll.bind_wheel(self)
 
+    def set_avatar_photo(self, photo: tk.PhotoImage) -> None:
+        if photo is not None:
+            self.avatar.show_photo(photo)
+
     def _on_enter(self, _event: tk.Event) -> None:
         self._set_bg(self._hover_bg)
 
