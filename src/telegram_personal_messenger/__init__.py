@@ -1,10 +1,18 @@
-"""Минимальный клиент Telegram с графическим интерфейсом."""
+"""Личный клиент Telegram с графическим интерфейсом."""
 
-__version__ = "0.1.0"
+from .config import Settings, load_settings
+from .models import Chat, Folder, Message, SendOutcome
+from .telegram_service import TelegramService
 
-# Удобные реэкспорты, чтобы можно было писать:
-# from telegram_personal_messenger import TgClient, load_config
-from .client import TgClient
-from .config import load_config
+__version__ = "0.2.0"
 
-__all__ = ["TgClient", "load_config", "__version__"]
+__all__ = [
+    "Chat",
+    "Folder",
+    "Message",
+    "SendOutcome",
+    "Settings",
+    "TelegramService",
+    "load_settings",
+    "__version__",
+]

@@ -191,3 +191,66 @@ class ConfigPersistenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyAndSessionConfigTests(unittest.TestCase):
+    def test_reads_legacy_tg_credentials_and_session(self):
+        with TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text(
+                "TG_API_ID=12345\n"
+                f"TG_API_HASH={'a' * 32}\n"
+                "TG_SESSION=old-session\n",
+                encoding="utf-8",
+            )
+            settings = load_settings(env_path, {"LOCALAPPDATA": directory})
+
+        self.assertEqual(settings.api_id, 12345)
+        self.assertEqual(settings.api_hash, "a" * 32)
+        self.assertEqual(settings.session_string, "old-session")
+
+    def test_save_session_string_replaces_old_value_and_preserves_others(self):
+        with TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text(
+                "KEEP=yes\nTG_SESSION=old\nTELEGRAM_API_ID=1\n",
+                encoding="utf-8",
+            )
+
+            config.save_session_string(env_path, "new-session")
+
+            text = env_path.read_text(encoding="utf-8")
+        self.assertIn("KEEP=yes", text)
+        self.assertEqual(text.count("TG_SESSION="), 1)
+        self.assertIn("TG_SESSION=new-session", text)
+        self.assertNotIn("TG_SESSION=old", text)
+
+    def test_save_api_credentials_removes_legacy_api_lines(self):
+        with TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text(
+                "TG_API_ID=1\nTG_API_HASH=old\nTG_SESSION=keep\n",
+                encoding="utf-8",
+            )
+
+            config.save_api_credentials(env_path, "12345", "b" * 32, env={})
+
+            text = env_path.read_text(encoding="utf-8")
+        self.assertNotIn("TG_API_ID=", text)
+        self.assertNotIn("TG_API_HASH=", text)
+        self.assertIn("TG_SESSION=keep", text)
+        self.assertIn("TELEGRAM_API_ID=12345", text)
+
+    def test_session_path_uses_xdg_when_localappdata_missing(self):
+        settings = load_settings(
+            Path("unused.env"),
+            {
+                "TELEGRAM_API_ID": "12345",
+                "TELEGRAM_API_HASH": "a" * 32,
+                "XDG_DATA_HOME": "/tmp/xdg-data",
+            },
+        )
+        self.assertEqual(
+            settings.session_path,
+            Path("/tmp/xdg-data") / "TelegramPersonalMessenger" / "session",
+        )

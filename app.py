@@ -1,74 +1,136 @@
 #!/usr/bin/env python3
 """Запуск графического клиента Telegram."""
-import asyncio
+
+from __future__ import annotations
+
 import logging
 import sys
-import threading
+import tkinter as tk
 from pathlib import Path
+from tkinter import messagebox
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from telegram_personal_messenger.config import load_config
-from telegram_personal_messenger.client import TgClient
-from telegram_personal_messenger.gui import TgGui
+from telegram_personal_messenger.async_worker import AsyncWorker
+from telegram_personal_messenger.config import (
+    CredentialError,
+    Settings,
+    default_env_path,
+    load_settings,
+)
+from telegram_personal_messenger.telegram_service import TelegramService
+from telegram_personal_messenger.ui import MainWindow, SetupView, Theme
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("app")
 
 
-def update_env_session(new_session: str) -> None:
-    env_path = Path(__file__).resolve().parent / ".env"
-    if not env_path.exists():
+def _enable_high_dpi() -> None:
+    if sys.platform != "win32":
         return
-    lines = env_path.read_text().splitlines()
-    out = []
-    found = False
-    for line in lines:
-        if line.startswith("TG_SESSION="):
-            out.append(f"TG_SESSION={new_session}")
-            found = True
-        else:
-            out.append(line)
-    if not found:
-        out.append(f"TG_SESSION={new_session}")
-    env_path.write_text("\n".join(out) + "\n")
+    try:
+        import ctypes
 
-
-def start_background_loop(loop: asyncio.AbstractEventLoop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
-
-async def async_main(tg: TgClient):
-    new_session = await tg.connect_and_auth()
-    if new_session:
-        update_env_session(new_session)
-    me = await tg.get_me()
-    logger.info("Вход выполнен: %s (@%s)", me.first_name, me.username)
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
 
 
 def main() -> None:
-    api_id, api_hash, session_str = load_config()
+    _enable_high_dpi()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("telethon").setLevel(logging.WARNING)
 
-    loop = asyncio.new_event_loop()
-    threading.Thread(target=start_background_loop, args=(loop,), daemon=True).start()
+    root = tk.Tk()
+    theme = Theme(root)
+    env_path = default_env_path()
 
-    tg = TgClient(api_id, api_hash, session_str)
+    try:
+        settings = load_settings(env_path)
+    except CredentialError as exc:
+        _show_setup(root, theme, env_path, exc)
+        root.mainloop()
+        return
+    except (OSError, ValueError) as exc:
+        logger.warning("Не удалось загрузить настройки: %s", type(exc).__name__)
+        messagebox.showerror(
+            "Ошибка настроек",
+            "Не удалось загрузить настройки Telegram. "
+            "Проверь файл .env и права на папку проекта.",
+            parent=root,
+        )
+        root.destroy()
+        return
 
-    future = asyncio.run_coroutine_threadsafe(async_main(tg), loop)
-    future.result()
+    app = _create_app(root, theme, settings, env_path)
+    if app is not None:
+        root.mainloop()
 
-    gui = TgGui(tg, loop)
 
-    async def on_incoming(event):
-        sender = await event.get_sender()
-        name = getattr(sender, "first_name", None) or getattr(sender, "title", "?")
-        gui.push_incoming(name, event.raw_text or "<медиа>", event.chat_id)
+def _show_setup(
+    root: tk.Tk,
+    theme: Theme,
+    env_path: Path,
+    error: Exception,
+) -> None:
+    root.title("Telegram — настройка")
+    root.geometry("640x760")
+    root.minsize(560, 680)
 
-    tg.start_listening(on_incoming)
+    def on_saved(settings: Settings) -> None:
+        for child in root.winfo_children():
+            child.destroy()
+        root.title("Telegram — личный клиент")
+        _create_app(root, theme, settings, env_path)
 
-    gui.load_folders_and_chats()   # <── вот эта строка
-    gui.run()
+    setup = SetupView(
+        root,
+        theme,
+        env_path,
+        on_saved,
+        root.destroy,
+    )
+    setup.pack(fill="both", expand=True)
+    logger.info("Показана настройка API: %s", type(error).__name__)
+
+
+def _create_app(
+    root: tk.Tk,
+    theme: Theme,
+    settings: Settings,
+    env_path: Path,
+) -> MainWindow | None:
+    worker = AsyncWorker()
+    try:
+        service = TelegramService(settings)
+    except Exception as exc:
+        logger.warning("Не удалось создать клиент Telegram: %s", type(exc).__name__)
+        worker.close()
+        messagebox.showerror(
+            "Ошибка подключения",
+            "Не удалось создать клиент Telegram. Проверь настройки и попробуй снова.",
+            parent=root,
+        )
+        root.destroy()
+        return None
+
+    try:
+        window = MainWindow(root, theme, service, worker, settings, env_path)
+    except Exception as exc:
+        logger.warning("Не удалось открыть окно клиента: %s", type(exc).__name__)
+        worker.close()
+        messagebox.showerror(
+            "Ошибка интерфейса",
+            "Не удалось открыть окно клиента. Перезапусти приложение.",
+            parent=root,
+        )
+        root.destroy()
+        return None
+
+    setattr(root, "_telegram_app", window)
+    return window
 
 
 if __name__ == "__main__":

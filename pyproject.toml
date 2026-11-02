@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-personal-messenger"
-version = "0.1.0"
+version = "0.2.0"
+description = "Личный клиент Telegram с тёмным интерфейсом на Tkinter"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["Telethon==1.45.0", "python-dotenv==1.2.4"]
 
