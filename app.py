@@ -1,84 +1,80 @@
 #!/usr/bin/env python3
-"""Минимальный консольный клиент Telegram."""
+"""Запуск графического клиента Telegram."""
 import asyncio
 import logging
 import sys
+import threading
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-# Добавляем src в путь, чтобы импортировать пакет
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from telegram_personal_messenger.auth import qr_login  # noqa: E402
-from telegram_personal_messenger.client import TgClient  # noqa: E402
-from telegram_personal_messenger.config import load_config  # noqa: E402
+from telegram_personal_messenger.config import load_config
+from telegram_personal_messenger.client import TgClient
+from telegram_personal_messenger.gui import TgGui
 
-# ─── Логирование ─────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stdout,
-)
-logging.getLogger("telethon.network").setLevel(logging.INFO)
-logging.getLogger("telethon.extensions").setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("app")
 
 
 def update_env_session(new_session: str) -> None:
-    """Обновляет TG_SESSION в .env, чтобы не логиниться каждый раз."""
     env_path = Path(__file__).resolve().parent / ".env"
     if not env_path.exists():
-        logger.warning(".env не найден, сессию сохрани вручную")
         return
-
-    lines = env_path.read_text(encoding="utf-8").splitlines()
-    new_lines = []
+    lines = env_path.read_text().splitlines()
+    out = []
     found = False
     for line in lines:
         if line.startswith("TG_SESSION="):
-            new_lines.append(f"TG_SESSION={new_session}")
+            out.append(f"TG_SESSION={new_session}")
             found = True
         else:
-            new_lines.append(line)
+            out.append(line)
     if not found:
-        new_lines.append(f"TG_SESSION={new_session}")
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    logger.info("Сессия обновлена в .env")
+        out.append(f"TG_SESSION={new_session}")
+    env_path.write_text("\n".join(out) + "\n")
 
 
-async def on_incoming(event) -> None:
-    sender = await event.get_sender()
-    name = getattr(sender, "first_name", None) or getattr(sender, "title", "?")
-    print(f"\n[{name}]: {event.raw_text}")
+def start_background_loop(loop: asyncio.AbstractEventLoop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
 
 
-async def main() -> None:
+async def async_main(tg: TgClient):
+    new_session = await tg.connect_and_auth()
+    if new_session:
+        update_env_session(new_session)
+    me = await tg.get_me()
+    logger.info("Вход выполнен: %s (@%s)", me.first_name, me.username)
+
+
+def main() -> None:
     api_id, api_hash, session_str = load_config()
+
+    # Отдельный поток с asyncio loop для Telethon
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=start_background_loop, args=(loop,), daemon=True).start()
+
     tg = TgClient(api_id, api_hash, session_str)
 
-    new_session = await tg.connect_and_auth()
-    if new_session and new_session != session_str:
-        update_env_session(new_session)
+    # Авторизация до запуска GUI
+    future = asyncio.run_coroutine_threadsafe(async_main(tg), loop)
+    future.result()  # ждём завершения входа
 
-    me = await tg.get_me()
-    print(f"\n✅ Залогинен как: {me.first_name} (@{me.username}) id={me.id}\n")
+    # Создаём GUI в главном потоке
+    gui = TgGui(tg, loop)
 
-    # Тестовое сообщение
-    await tg.send_to_saved("Тест из консольного клиента на сервере 👋")
+    # Регистрируем обработчик входящих, который пушит в GUI
+    async def on_incoming(event):
+        sender = await event.get_sender()
+        name = getattr(sender, "first_name", None) or getattr(sender, "title", "?")
+        gui.push_incoming(name, event.raw_text or "<медиа>", event.chat_id)
 
     tg.start_listening(on_incoming)
-    print("Слушаю входящие. Ctrl+C для выхода.\n")
 
-    try:
-        await tg.run_until_disconnected()
-    finally:
-        await tg.disconnect()
+    # Загружаем чаты и запускаем mainloop
+    gui.load_chats()
+    gui.run()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nВыход.")
+    main()
