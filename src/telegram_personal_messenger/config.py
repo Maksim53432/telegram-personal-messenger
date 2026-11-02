@@ -11,13 +11,15 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import hexdigits
-from typing import Mapping
+from typing import Any, Literal, Mapping
+from urllib.parse import unquote, urlsplit
 
 from dotenv import dotenv_values
 
 API_ID_KEYS = ("TELEGRAM_API_ID", "TG_API_ID")
 API_HASH_KEYS = ("TELEGRAM_API_HASH", "TG_API_HASH")
 SESSION_KEYS = ("TG_SESSION", "TELEGRAM_SESSION")
+PROXY_KEYS = ("TELEGRAM_PROXY", "TG_PROXY")
 SESSION_DIR_NAME = "TelegramPersonalMessenger"
 
 _CREDENTIALS_HINT = (
@@ -31,6 +33,28 @@ class CredentialError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class Proxy:
+    """Локальный SOCKS/HTTP-прокси для MTProto."""
+
+    kind: Literal["socks5", "socks4", "http"]
+    host: str
+    port: int
+    username: str | None = field(default=None, repr=False)
+    password: str | None = field(default=None, repr=False)
+    rdns: bool = True
+
+    def as_telethon(self) -> dict[str, Any]:
+        return {
+            "proxy_type": self.kind,
+            "addr": self.host,
+            "port": self.port,
+            "username": self.username,
+            "password": self.password,
+            "rdns": self.rdns,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     """Проверенные настройки подключения к Telegram."""
 
@@ -38,6 +62,7 @@ class Settings:
     api_hash: str = field(repr=False)
     session_path: Path
     session_string: str = field(default="", repr=False)
+    proxy: Proxy | None = field(default=None, repr=False)
 
 
 def default_env_path() -> Path:
@@ -66,12 +91,14 @@ def load_settings(
 
     api_id, api_hash = validate_api_credentials(api_id_raw, api_hash_raw)
     session_string = (_first(values, SESSION_KEYS) or "").strip()
+    proxy = parse_proxy(_first(values, PROXY_KEYS) or "")
 
     return Settings(
         api_id=api_id,
         api_hash=api_hash,
         session_path=session_path(values),
         session_string=session_string,
+        proxy=proxy,
     )
 
 
@@ -84,6 +111,45 @@ def read_api_credentials(
     return (
         _first(values, API_ID_KEYS) or "",
         _first(values, API_HASH_KEYS) or "",
+    )
+
+
+def parse_proxy(value: str) -> Proxy | None:
+    """Разбирает socks5://, socks5h://, socks4:// или http:// URL.
+
+    Секреты не попадают в текст ошибки.
+    """
+
+    text = value.strip()
+    if not text:
+        return None
+    if "://" not in text:
+        text = "socks5://" + text
+
+    parsed = urlsplit(text)
+    kind = parsed.scheme.lower()
+    if kind == "socks5h":
+        kind = "socks5"
+    if kind not in ("socks5", "socks4", "http"):
+        raise CredentialError(
+            "TG_PROXY должен начинаться с socks5://, socks5h://, socks4:// или http://."
+        )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise CredentialError("В TG_PROXY указан неверный порт.") from exc
+    if not parsed.hostname or not port or not (1 <= port <= 65535):
+        raise CredentialError(
+            "TG_PROXY должен быть в формате socks5://127.0.0.1:1080."
+        )
+
+    return Proxy(
+        kind=kind,
+        host=parsed.hostname,
+        port=port,
+        username=unquote(parsed.username) if parsed.username else None,
+        password=unquote(parsed.password) if parsed.password else None,
+        rdns=True,
     )
 
 

@@ -86,6 +86,11 @@ class TelegramService:
                 flood_sleep_threshold=0,
                 device_model="Telegram Personal Messenger",
                 app_version="0.2.0",
+                proxy=(
+                    settings.proxy.as_telethon()
+                    if settings.proxy is not None
+                    else None
+                ),
             )
         except Exception as exc:
             raise TelegramServiceError(errors.CONNECTION) from exc

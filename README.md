@@ -59,6 +59,18 @@ TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 - Windows: `%LOCALAPPDATA%\TelegramPersonalMessenger\session`;
 - Linux/macOS: `~/.local/share/TelegramPersonalMessenger/session`.
 
+## Прокси
+
+Если Telegram не открывается напрямую, укажи локальный прокси в `.env`:
+
+```dotenv
+TG_PROXY=socks5://127.0.0.1:1080
+```
+
+Поддерживаются `socks5://`, `socks5h://`, `socks4://` и `http://`.
+Логин и пароль можно передать как `socks5://user:pass@127.0.0.1:1080`.
+Прокси не используется, если переменная пустая.
+
 ## Горячие клавиши
 
 - `Enter` — отправить сообщение;

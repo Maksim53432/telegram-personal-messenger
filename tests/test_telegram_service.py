@@ -21,7 +21,7 @@ from telethon.tl.types import (
 )
 
 from telegram_personal_messenger import errors
-from telegram_personal_messenger.config import Settings
+from telegram_personal_messenger.config import Proxy, Settings
 from telegram_personal_messenger.errors import TelegramServiceError
 from telegram_personal_messenger.telegram_service import TelegramService
 
@@ -194,6 +194,25 @@ class TelegramServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await service.is_authorized())
         self.assertEqual(client.dialog_limit, "unset")
+
+    def test_proxy_is_passed_to_client_factory(self):
+        captured = {}
+
+        def factory(*args, **kwargs):
+            captured.update(kwargs)
+            return FakeClient()
+
+        settings = Settings(
+            12345,
+            "x" * 32,
+            Path("/tmp/tpm-test/session"),
+            proxy=Proxy("socks5", "127.0.0.1", 18080),
+        )
+        TelegramService(settings, client_factory=factory)
+
+        self.assertEqual(captured["proxy"]["proxy_type"], "socks5")
+        self.assertEqual(captured["proxy"]["addr"], "127.0.0.1")
+        self.assertEqual(captured["proxy"]["port"], 18080)
 
     async def test_connection_is_reused(self):
         client = FakeClient()

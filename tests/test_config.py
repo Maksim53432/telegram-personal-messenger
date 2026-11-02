@@ -254,3 +254,44 @@ class LegacyAndSessionConfigTests(unittest.TestCase):
             settings.session_path,
             Path("/tmp/xdg-data") / "TelegramPersonalMessenger" / "session",
         )
+
+
+class ProxyConfigTests(unittest.TestCase):
+    def test_load_settings_reads_proxy(self):
+        with TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text(
+                "TELEGRAM_API_ID=12345\n"
+                f"TELEGRAM_API_HASH={'a' * 32}\n"
+                "TG_PROXY=socks5://127.0.0.1:18080\n",
+                encoding="utf-8",
+            )
+            settings = load_settings(env_path, {"LOCALAPPDATA": directory})
+
+        self.assertIsNotNone(settings.proxy)
+        self.assertEqual(settings.proxy.kind, "socks5")
+        self.assertEqual(settings.proxy.host, "127.0.0.1")
+        self.assertEqual(settings.proxy.port, 18080)
+        self.assertEqual(
+            settings.proxy.as_telethon()["proxy_type"],
+            "socks5",
+        )
+
+    def test_socks5h_and_http_with_credentials(self):
+        socks = config.parse_proxy("socks5h://user:pa%20ss@localhost:1080")
+        self.assertEqual(socks.kind, "socks5")
+        self.assertEqual(socks.username, "user")
+        self.assertEqual(socks.password, "pa ss")
+        self.assertTrue(socks.rdns)
+
+        http = config.parse_proxy("http://127.0.0.1:8080")
+        self.assertEqual(http.kind, "http")
+        self.assertEqual(http.port, 8080)
+
+    def test_invalid_proxy_does_not_echo_secret(self):
+        with self.assertRaises(config.CredentialError) as error:
+            config.parse_proxy("ftp://user:super-secret@127.0.0.1:21")
+        self.assertNotIn("super-secret", str(error.exception))
+
+    def test_empty_proxy_is_none(self):
+        self.assertIsNone(config.parse_proxy("  "))

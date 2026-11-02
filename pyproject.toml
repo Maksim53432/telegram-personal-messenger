@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Личный клиент Telegram с тёмным интерфейсом на Tkinter"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["Telethon==1.45.0", "python-dotenv==1.2.4"]
+dependencies = ["Telethon==1.45.0", "python-dotenv==1.2.4", "python-socks==3.2.1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
