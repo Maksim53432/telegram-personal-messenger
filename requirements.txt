@@ -1,0 +1,5 @@
+Telethon==1.45.0
+PySide6-Essentials==6.12.0
+qasync==0.28.0
+python-socks==3.2.1
+cryptg
