@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tg-messenger-claude"
+version = "1.0.0"
+description = "Personal Telegram desktop client on PySide6 and Telethon"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "Telethon==1.45.0",
+    "PySide6-Essentials==6.12.0",
+    "qasync==0.28.0",
+    "python-socks==3.2.1",
+    "cryptg",
+]
+
+[project.scripts]
+tg-messenger-claude = "tgm.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["tgm*"]

@@ -31,6 +31,7 @@ MEDIA_MAX_H = 440
 STICKER = 180
 ROUND = 220
 _LONG_WORD = re.compile(r"[^\s<>&]{48,}")
+_TAGS = re.compile(r"<[^>]+>")
 
 
 def _break_long_words(html: str) -> str:
@@ -388,7 +389,7 @@ class Bubble(QFrame):
             via.setFont(self._small())
             lay.addWidget(via)
         if item.reply:
-            color = peer_color(None if not item.reply.sender else hash(item.reply.sender))
+            color = peer_color(item.reply.sender_id)
             quote = ReplyQuote(item.reply.sender, item.reply.text or "…", theme.LINK if item.out else color)
             quote.clicked.connect(lambda: ctx.list and ctx.list.jump_requested.emit(item.reply.msg_id))
             self.parts.append(quote)
@@ -473,7 +474,7 @@ class Bubble(QFrame):
         inline = False
         if self.text_label:
             self.text_label.fit(inner)
-            meta_w = QFontMetrics(self._small()).horizontalAdvance(self.inline_meta.text()) // 2 + 30
+            meta_w = QFontMetrics(self._small()).horizontalAdvance(_TAGS.sub("", self.inline_meta.text())) + 14
             # Inline the time on single-line text when it fits, like most messengers do.
             inline = self.text_label.single_line and self.text_label.width() + meta_w <= inner \
                 and not self.media_view and not self.item.reactions and not self.file_row

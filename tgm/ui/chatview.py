@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from telethon.tl import types
+
 from ..models import ChatItem, MessageItem
 from ..tasks import spawn
 from . import theme
@@ -288,6 +290,7 @@ class ChatView(QWidget):
             online = self._status == "в сети"
             self.h_status.setStyleSheet(f"color: {theme.LINK if online else theme.TEXT_DIM};")
             self.h_status.setText(self._status)
+        self.h_status.setVisible(bool(self.h_status.text()))
 
     def _on_typing(self, chat_id) -> None:
         if self.chat and chat_id == self.chat.peer_id:
@@ -376,7 +379,9 @@ class ChatView(QWidget):
     def _on_deleted(self, chat_id, ids: list) -> None:
         if not self.chat or not self.list:
             return
-        if chat_id is None and self.chat.kind == "channel" or chat_id is not None and chat_id != self.chat.peer_id:
+        # Without a chat id the ids belong to the shared box of private chats and small groups.
+        in_channel = isinstance(self.chat.entity, types.Channel)
+        if (chat_id is None and in_channel) or (chat_id is not None and chat_id != self.chat.peer_id):
             return
         self.list.remove(ids)
 

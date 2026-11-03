@@ -6,9 +6,9 @@ import asyncio
 import shutil
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QSplitter, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QStackedWidget, QVBoxLayout, QWidget
 
 from ..config import Settings
 from ..service import TelegramService
@@ -49,6 +49,8 @@ def _centered(text: str) -> QWidget:
 
 
 class MainWindow(QMainWindow):
+    finished = Signal()  # emitted once the client has disconnected after close
+
     def __init__(self, settings: Settings):
         super().__init__()
         self.settings = settings
@@ -170,6 +172,6 @@ class MainWindow(QMainWindow):
             try:
                 await asyncio.wait_for(self.service.stop(), 5)
             finally:
-                QApplication.quit()
+                self.finished.emit()
 
         spawn(shutdown(), quiet=True)

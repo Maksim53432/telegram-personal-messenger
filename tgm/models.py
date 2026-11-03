@@ -38,6 +38,7 @@ class MediaInfo:
 class ReplyInfo:
     msg_id: int
     sender: str = ""
+    sender_id: int | None = None
     text: str = ""
 
 

@@ -612,6 +612,7 @@ def fill_reply(reply: ReplyInfo, msg) -> None:
         return
     item = message_from_telethon(msg)
     reply.sender = item.sender_name
+    reply.sender_id = item.sender_id
     if not reply.text:
         reply.text = item.preview
 

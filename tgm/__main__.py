@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import sys
 
 import qasync
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .config import ConfigError, load_settings
@@ -34,19 +36,24 @@ def main() -> int:
         QMessageBox.critical(None, "Настройки", str(exc))
         return 2
 
+    # Quitting Qt stops the asyncio loop under pending tasks; let main() return instead.
+    app.setQuitOnLastWindowClosed(False)
     window = MainWindow(settings)
     window.show()
 
-    async def run() -> None:
-        closed = asyncio.Event()
-        app.aboutToQuit.connect(closed.set)
-        spawn(window.start())
-        await closed.wait()
+    # Ctrl+C in the terminal closes the window the normal way. The timer lets Python see the signal.
+    signal.signal(signal.SIGINT, lambda *_: window.close())
+    tick = QTimer(interval=300, timeout=lambda: None)
+    tick.start()
 
-    try:
-        qasync.run(run())
-    except asyncio.CancelledError:
-        pass
+    async def run() -> None:
+        done = asyncio.Event()
+        window.finished.connect(done.set)
+        app.aboutToQuit.connect(done.set)
+        spawn(window.start())
+        await done.wait()
+
+    qasync.run(run())
     return 0
 
 
